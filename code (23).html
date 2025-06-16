@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Aleph - Chain Reaction</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden; background: #000; touch-action: none;
+            -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+            font-family: "Press Start 2P", sans-serif; color: white;
+        }
+        canvas {
+            display: block; image-rendering: pixelated; image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+            cursor: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAAAXNSR0IArs4c6QAAAD9JREFUSEtjZKAxYKSx+QyjFhAM4gxgdCTQKYA+w0gB0YBCIQrCgL7IUgQfTBA3TBA3TBDfAEgGACaLUUE8S+3EAAAAAElFTkSuQmCC') 12 12, crosshair;
+        }
+    </style>
+</head>
+<body>
+    <script>
+        class ChainReactionGame {
+            constructor() {
+                this.gameCanvas = document.createElement('canvas');
+                this.gameContext = this.gameCanvas.getContext('2d');
+                this.GAME_WIDTH = 480; this.GAME_HEIGHT = 270;
+
+                this.displayCanvas = document.createElement('canvas');
+                this.displayContext = this.displayCanvas.getContext('2d');
+                document.body.appendChild(this.displayCanvas);
+
+                this.PALETTE_HUES = [350, 140, 210];
+                this.BOMB_HUE = 25; this.PLUS_HUE = 180; this.WISP_HUE = 260;
+                this.STONE_COLOR = '#8A8A8A'; this.EXPLOSION_HUE = 50;
+
+                this.setupCanvases();
+                this.setupInput();
+                
+                this.bubbles = []; this.particles = [];
+                this.level = 1;
+                this.gameState = 'playing';
+                this.aimPos = null;
+                this.initialExplosionRadius = 60;
+                
+                this.startLevel();
+                this.gameLoop();
+            }
+
+            startLevel() {
+                this.tapsUsed = 0;
+                // CHALLENGE ENHANCEMENT: "Boss Levels" with fewer taps
+                this.maxTaps = (this.level > 4 && this.level % 3 === 2) ? 2 : 3;
+                this.gameState = 'playing';
+                this.spawnBubbles();
+            }
+            
+            setupCanvases() {
+                this.gameCanvas.width = this.GAME_WIDTH; this.gameCanvas.height = this.GAME_HEIGHT;
+                this.displayCanvas.width = window.innerWidth; this.displayCanvas.height = window.innerHeight;
+                [this.gameContext, this.displayContext].forEach(ctx => { ctx.imageSmoothingEnabled = false; });
+                window.addEventListener('resize', () => this.onResize());
+            }
+
+            onResize() {
+                this.displayCanvas.width = window.innerWidth; this.displayCanvas.height = window.innerHeight;
+                this.displayContext.imageSmoothingEnabled = false;
+            }
+            
+            setupInput() {
+                const getGamePos = (e) => {
+                    const rect = this.displayCanvas.getBoundingClientRect();
+                    const rawX = (e.touches?.[0] || e).clientX - rect.left;
+                    const rawY = (e.touches?.[0] || e).clientY - rect.top;
+                    const scale = Math.min(this.displayCanvas.width / this.GAME_WIDTH, this.displayCanvas.height / this.GAME_HEIGHT);
+                    const offsetX = (this.displayCanvas.width - this.GAME_WIDTH * scale) / 2;
+                    const offsetY = (this.displayCanvas.height - this.GAME_HEIGHT * scale) / 2;
+                    return { x: (rawX - offsetX) / scale, y: (rawY - offsetY) / scale };
+                };
+                const handleMove = (e) => {
+                    const pos = getGamePos(e);
+                    if (this.gameState === 'playing' && pos.x > 0 && pos.x < this.GAME_WIDTH && pos.y > 0 && pos.y < this.GAME_HEIGHT) {
+                        this.aimPos = pos;
+                    } else { this.aimPos = null; }
+                };
+                const handleClick = (e) => {
+                    e.preventDefault();
+                    if (this.aimPos) {
+                        this.startChainReaction(this.aimPos.x, this.aimPos.y);
+                    } else if (this.gameState === 'failed') { // BUG FIX: Only restart on 'failed' state
+                        this.restartGame();
+                    }
+                    // Taps during 'won' state are now correctly ignored
+                };
+                
+                this.displayCanvas.addEventListener('mousemove', handleMove);
+                this.displayCanvas.addEventListener('touchmove', handleMove, { passive: false });
+                this.displayCanvas.addEventListener('mouseleave', () => { this.aimPos = null; });
+                this.displayCanvas.addEventListener('click', handleClick);
+                this.displayCanvas.addEventListener('touchstart', (e) => { handleMove(e); handleClick(e); }, { passive: false });
+            }
+            
+            spawnBubbles() {
+                this.bubbles = [];
+                const numBubbles = 8 + this.level * 2;
+                
+                for (let i = 0; i < numBubbles; i++) {
+                    let bubble;
+                    do {
+                        // CHALLENGE ENHANCEMENT: Smarter level generation
+                        let type = 'normal';
+                        const levelFactor = Math.random() < this.level / 15;
+                        if (this.level >= 4 && levelFactor && i % 5 === 0) type = 'wisp';
+                        else if (this.level >= 3 && levelFactor && i % 4 === 0) type = 'plus';
+                        else if (this.level >= 2 && levelFactor && i % 3 === 0) type = 'stone';
+                        else if (this.level >= 2 && levelFactor && i % 5 === 1) type = 'bomb';
+                        
+                        let hue = this.PALETTE_HUES[i % this.PALETTE_HUES.length];
+                        if (type === 'bomb') hue = this.BOMB_HUE;
+                        else if (type === 'plus') hue = this.PLUS_HUE;
+                        else if (type === 'wisp') hue = this.WISP_HUE;
+
+                        bubble = {
+                            x: Math.random() * (this.GAME_WIDTH - 100) + 50,
+                            y: Math.random() * (this.GAME_HEIGHT - 100) + 50,
+                            vx: type === 'wisp' ? (Math.random() - 0.5) * 20 : 0,
+                            vy: type === 'wisp' ? (Math.random() - 0.5) * 20 : 0,
+                            radius: 12 + Math.random() * 5,
+                            type: type, health: type === 'stone' ? 2 : 1,
+                            expanding: false, expandRadius: 0, opacity: 1,
+                            pulse: Math.random() * Math.PI * 2, hue: hue
+                        };
+                    } while (this.overlaps(bubble));
+                    this.bubbles.push(bubble);
+                }
+            }
+            
+            overlaps(newBubble) {
+                for (let bubble of this.bubbles) {
+                    if (Math.hypot(newBubble.x-bubble.x, newBubble.y-bubble.y) < newBubble.radius+bubble.radius+10) return true;
+                }
+                return false;
+            }
+            
+            startChainReaction(x, y) {
+                if (this.gameState !== 'playing' || this.tapsUsed >= this.maxTaps) return;
+                this.tapsUsed++; this.aimPos = null;
+                this.createExplosion(x, y, this.initialExplosionRadius);
+                this.checkChainReactions();
+                setTimeout(() => this.checkGameState(), 1000);
+            }
+            
+            hitBubble(bubble) {
+                if (bubble.health <= 0) return;
+                bubble.health--;
+                if (bubble.type === 'stone' && bubble.health > 0) {
+                    this.createParticles(bubble, 5, bubble.hue, 0.5); return;
+                }
+                this.popBubble(bubble);
+            }
+            
+            createExplosion(x, y, radius) {
+                for (let bubble of this.bubbles) {
+                    if (bubble.expanding) continue;
+                    if (Math.hypot(bubble.x-x, bubble.y-y) < radius + bubble.radius) {
+                        this.hitBubble(bubble);
+                    }
+                }
+                this.createParticles({x, y, hue:this.EXPLOSION_HUE}, 30, this.EXPLOSION_HUE, 1.0, radius);
+            }
+            
+            popBubble(bubble) {
+                if (bubble.expanding) return;
+                bubble.expanding = true; bubble.expandRadius = bubble.radius;
+                if (bubble.type === 'plus') this.tapsUsed = Math.max(0, this.tapsUsed - 1);
+                this.createParticles(bubble, 15);
+            }
+
+            createParticles(src, count, hue, life, radius) {
+                const h = hue !== undefined ? hue : src.hue;
+                for (let i = 0; i < count; i++) {
+                    const angle = Math.random()*Math.PI*2, speed = 25+Math.random()*50, dist = Math.random()*(radius||0);
+                    this.particles.push({
+                        x: src.x + Math.cos(angle)*dist, y: src.y + Math.sin(angle)*dist,
+                        vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed,
+                        life: life || 1, decay: 0.015, size: 2+Math.random()*2, hue: h
+                    });
+                }
+            }
+            
+            checkGameState() {
+                if (this.gameState !== 'playing') return;
+                if (this.bubbles.filter(b => !b.expanding).length === 0) {
+                    this.gameState = 'won';
+                    setTimeout(() => { this.level++; this.startLevel(); }, 2000);
+                } else if (this.tapsUsed >= this.maxTaps && !this.bubbles.some(b => b.expanding)) {
+                    this.gameState = 'failed';
+                }
+            }
+            
+            checkChainReactions() {
+                let hadReaction = false;
+                for (let b of this.bubbles) {
+                    if (!b.expanding) continue;
+                    const reactionRadius = b.expandRadius * (b.type === 'bomb' ? 4.0 : 2.5);
+                    for (let other of this.bubbles) {
+                        if (other.health <= 0 || other === b) continue;
+                        if (Math.hypot(other.x-b.x, other.y-b.y) < reactionRadius + other.radius) {
+                            this.hitBubble(other); hadReaction = true;
+                        }
+                    }
+                }
+                if (hadReaction) setTimeout(() => this.checkChainReactions(), 100);
+                else setTimeout(() => this.checkGameState(), 500);
+            }
+            
+            update(deltaTime) {
+                const dt = deltaTime / 1000;
+                for (let i = this.bubbles.length - 1; i >= 0; i--) {
+                    const b = this.bubbles[i];
+                    b.pulse += deltaTime * 0.003;
+                    if (b.type === 'wisp') { // CHALLENGE ENHANCEMENT: Move Wisps
+                        b.x += b.vx * dt; b.y += b.vy * dt;
+                        if (b.x - b.radius < 0 || b.x + b.radius > this.GAME_WIDTH) b.vx *= -1;
+                        if (b.y - b.radius < 0 || b.y + b.radius > this.GAME_HEIGHT) b.vy *= -1;
+                    }
+                    if (b.expanding) {
+                        b.expandRadius += deltaTime * (b.type === 'bomb' ? 0.25 : 0.15);
+                        b.opacity -= deltaTime * 0.002;
+                        if (b.opacity <= 0) this.bubbles.splice(i, 1);
+                    }
+                }
+                for (let i = this.particles.length - 1; i >= 0; i--) {
+                    const p = this.particles[i];
+                    p.x += p.vx * dt; p.y += p.vy * dt;
+                    p.vx *= 0.98; p.vy *= 0.98; p.life -= p.decay;
+                    if (p.life <= 0) this.particles.splice(i, 1);
+                }
+            }
+            
+            restartGame() { this.level = 1; this.startLevel(); }
+
+            drawText(ctx, text, x, y, size, color) {
+                ctx.font = `${size}px "Press Start 2P"`;
+                const offset = Math.max(1, Math.floor(size * 0.1));
+                ctx.fillStyle = '#000000'; ctx.fillText(text, x + offset, y + offset);
+                ctx.fillStyle = color; ctx.fillText(text, x, y);
+            }
+            
+            drawGame() {
+                const ctx = this.gameContext;
+                ctx.fillStyle = '#1D1F3D'; ctx.fillRect(0, 0, this.GAME_WIDTH, this.GAME_HEIGHT);
+                
+                for (let b of this.bubbles) {
+                    const r = b.radius + Math.sin(b.pulse) * (b.type === 'bomb' ? 2.5 : 1.5);
+                    ctx.globalAlpha = b.type === 'wisp' ? 0.7 + Math.sin(b.pulse) * 0.1 : 1.0;
+                    if (b.expanding) {
+                        ctx.strokeStyle = `hsla(${b.hue}, 80%, 70%, ${b.opacity})`;
+                        ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(b.x, b.y, b.expandRadius, 0, Math.PI * 2); ctx.stroke();
+                    } else {
+                        const grad = ctx.createRadialGradient(b.x-r*0.3, b.y-r*0.3, 0, b.x, b.y, r);
+                        if(b.type==='stone'){grad.addColorStop(0,'#C0C0C0');grad.addColorStop(1,this.STONE_COLOR);}
+                        else{grad.addColorStop(0,`hsla(${b.hue},80%,80%,1)`);grad.addColorStop(1,`hsla(${b.hue},80%,50%,1)`);}
+                        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(b.x, b.y, r, 0, Math.PI * 2); ctx.fill();
+                        
+                        ctx.textAlign = 'center';
+                        if (b.type === 'stone' && b.health === 1) {
+                            ctx.strokeStyle='rgba(0,0,0,0.5)';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(b.x-r*0.5,b.y-r*0.5);ctx.lineTo(b.x+r*0.3,b.y+r*0.4);ctx.stroke();
+                        } else if (b.type === 'bomb') this.drawText(ctx, '☠', b.x, b.y + r*0.4, r*1.2, 'rgba(0,0,0,0.5)');
+                        else if (b.type === 'plus') this.drawText(ctx, '+1', b.x, b.y + r*0.3, r, 'rgba(255,255,255,0.9)');
+                    }
+                    ctx.globalAlpha = 1.0;
+                }
+                
+                for (let p of this.particles) {
+                    ctx.fillStyle = `hsla(${p.hue}, 80%, 70%, ${p.life})`;
+                    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+                }
+
+                if (this.aimPos && this.tapsUsed < this.maxTaps) {
+                    ctx.strokeStyle='rgba(255,255,255,0.5)';ctx.lineWidth=1;ctx.setLineDash([3,3]);
+                    ctx.beginPath();ctx.arc(this.aimPos.x,this.aimPos.y,this.initialExplosionRadius,0,Math.PI*2);ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+                
+                this.drawUI(ctx);
+            }
+            
+            drawUI(ctx) {
+                ctx.textAlign = 'left';
+                this.drawText(ctx, `WORLD 1-${this.level}`, 8, 18, 10, '#FFFFFF');
+                const bubblesLeft = this.bubbles.filter(b => !b.expanding).length;
+                this.drawText(ctx, `BUBBLES: ${bubblesLeft}`, 8, 32, 10, '#FFFFFF');
+                const tapsLeft = this.maxTaps - this.tapsUsed;
+                this.drawText(ctx, `TRIES: ${tapsLeft}`, 8, 46, 10, tapsLeft <= 1 ? '#D95745' : '#FFFFFF');
+                
+                ctx.textAlign = 'center';
+                if (this.gameState === 'won') this.drawText(ctx, 'LEVEL COMPLETE!', this.GAME_WIDTH/2, this.GAME_HEIGHT/2 - 5, 16, '#78B83C');
+                else if (this.gameState === 'failed') this.drawText(ctx, 'LEVEL FAILED', this.GAME_WIDTH/2, this.GAME_HEIGHT/2-5, 16, '#D95745');
+                else if (this.tapsUsed === 0) {
+                    if (this.maxTaps < 3) this.drawText(ctx, 'BOSS LEVEL! ONLY 2 TRIES!', this.GAME_WIDTH/2, this.GAME_HEIGHT - 25, 8, '#D95745');
+                    else if (this.level >= 4) this.drawText(ctx, 'Wisps are on the move... Time your shot!', this.GAME_WIDTH/2, this.GAME_HEIGHT-25, 8, 'rgba(255,255,255,0.8)');
+                }
+            }
+
+            render() {
+                this.drawGame();
+                const scale = Math.min(this.displayCanvas.width / this.GAME_WIDTH, this.displayCanvas.height / this.GAME_HEIGHT);
+                const newWidth = this.GAME_WIDTH*scale, newHeight = this.GAME_HEIGHT*scale;
+                const offsetX = (this.displayCanvas.width-newWidth)/2, offsetY = (this.displayCanvas.height-newHeight)/2;
+                this.displayContext.fillStyle = '#000000';
+                this.displayContext.fillRect(0, 0, this.displayCanvas.width, this.displayCanvas.height);
+                this.displayContext.drawImage(this.gameCanvas, offsetX, offsetY, newWidth, newHeight);
+            }
+            
+            gameLoop() {
+                const currentTime = performance.now();
+                const deltaTime = Math.min(currentTime - (this.lastTime || currentTime), 32);
+                this.lastTime = currentTime;
+                this.update(deltaTime); this.render();
+                requestAnimationFrame(() => this.gameLoop());
+            }
+        }
+        
+        window.addEventListener('load', () => { new ChainReactionGame(); });
+    </script>
+</body>
+</html>
